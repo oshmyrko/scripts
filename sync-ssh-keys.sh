@@ -78,9 +78,9 @@ for key in ${keys}; do
         continue
     fi
 
-    # id -u name
     # Create user if not exists, but its public key is present
-    if ! (cut -d: -f1 /etc/passwd | grep -qx ${username}); then
+    if ! (id -u ${username} &> /dev/null); then
+   #if ! (cut -d: -f1 /etc/passwd | grep -qx ${username}); then
         /usr/sbin/useradd -m -s /bin/bash -G wheel ${username}
         mkdir -m 700 /home/${username}/.ssh
         echo_date_message "${username} account was created."
