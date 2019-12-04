@@ -78,6 +78,7 @@ for key in ${keys}; do
         continue
     fi
 
+    # id -u name
     # Create user if not exists, but its public key is present
     if ! (cut -d: -f1 /etc/passwd | grep -qx ${username}); then
         /usr/sbin/useradd -m -s /bin/bash -G wheel ${username}
