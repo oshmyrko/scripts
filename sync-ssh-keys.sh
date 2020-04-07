@@ -9,8 +9,8 @@ set -o pipefail
 usage() {
     cat <<-EOF
 Usage: $0 [OPTION]...
-   or: $0 --s3-path
-   or: $0 --s3-path --debug
+   or: $0 --s3-path PATH
+   or: $0 --s3-path PATH --debug
    or: $0 -h|--help
 
 Sync SSH public keys from S3 and create/delete user accounts basing on key name.
@@ -21,9 +21,63 @@ Options:
 EOF
 }
 
-# Function for displaying message with prepended date
-echo_date_message() {
-    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] - $1"
+# ------------------------------------------------------------------------------
+# Constants
+# ------------------------------------------------------------------------------
+# Temporary directory to download public keys
+TEMP_DIR=/tmp/ssh-keys
+
+# ------------------------------------------------------------------------------
+# Functions
+# ------------------------------------------------------------------------------
+# Log message with prepended date
+log_info() {
+    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')]: $1"
+}
+
+create_users_with_keys() {
+    # List of public keys
+    local keys=$(ls ${TEMP_DIR})
+    # Create users and add or update their public keys
+    for key in ${keys}; do
+        username=${key%.pub}
+
+        # Check if username is valid
+        if ! [[ "${username}" =~ ^[a-z][-a-z0-9.]*$ ]]; then
+            log_info "Skip ${username} user. The name is not valid."
+            # Skip the key and proceed with the next one
+            continue
+        fi
+
+        # Create user if not exists, but its public key is present
+        if ! (id -u ${username} &> /dev/null); then
+            useradd -m -s /bin/bash -G wheel ${username}
+            mkdir -m 700 /home/${username}/.ssh
+            log_info "${username} account was created."
+    
+            cp -u ${TEMP_DIR}/${key} /home/${username}/.ssh/authorized_keys
+            chown -R ${username}:${username} /home/${username}/.ssh
+            log_info "${username} public key was added."
+        # Update user's public key in case it was changed (comparison shows changes)
+        elif ! (cmp -s ${TEMP_DIR}/${key} /home/${username}/.ssh/authorized_keys); then
+            cp -u ${TEMP_DIR}/${key} /home/${username}/.ssh/authorized_keys
+            chown -R ${username}:${username} /home/${username}/.ssh
+            log_info "${username} public key was updated."
+        fi
+    done
+}
+
+# Delete user in case its public key was deleted
+delete_users_without_keys() {
+    # List of local users (excluding ec2-user, centos and ubuntu)
+    local local_users=$(ls /home/ | grep -Evw "ec2-user|centos|ubuntu")
+
+    for local_user in ${local_users}; do
+        if [ ! -f "${TEMP_DIR}/${local_user}.pub" ]; then
+            userdel -rf ${local_user}
+            log_info "${local_user} account was deleted."
+        fi
+    done
 }
 
 # ------------------------------------------------------------------------------
@@ -46,64 +100,24 @@ while [ $# -ne 0 ]; do
     esac
 done
 
-# Directory to store
-tmp_dir=/tmp/ssh-keys
+# ------------------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------------------
+log_info "Starting..."
 
 # Sync public keys from S3 bucket to local directory
 if (aws s3 sync s3://${s3_path}   \
-                ${tmp_dir}        \
+                ${TEMP_DIR}       \
                 --exclude "*"     \
                 --include "*.pub" \
                 --delete          \
                 --no-progress     \
                 | grep -Ewq '^download|delete'); then
-    echo_date_message 'Starting...'
+    create_users_with_keys
+    delete_users_without_keys
 else
-    echo_date_message 'No keys to update.'
-    # TODO: delete manually created users even if no key changes
-    exit 0
+    # Delete manually created users
+    delete_users_without_keys
 fi
 
-# List of public keys
-keys=$(ls ${tmp_dir})
-
-# Create users and add or update their public keys
-for key in ${keys}; do
-    username=${key%.pub}
-
-    # Check if username is valid
-    if ! [[ "${username}" =~ ^[a-z][-a-z0-9.]*$ ]]; then
-        echo_date_message "Skip ${username} user. The name is not valid."
-        # Skip the key and proceed with the next one
-        continue
-    fi
-
-    # Create user if not exists, but its public key is present
-    if ! (cut -d: -f1 /etc/passwd | grep -qx ${username}); then
-        /usr/sbin/useradd -m -s /bin/bash -G wheel ${username}
-        mkdir -m 700 /home/${username}/.ssh
-        echo_date_message "${username} account was created."
-
-        cp -u ${tmp_dir}/${key} /home/${username}/.ssh/authorized_keys
-        chown -R ${username}:${username} /home/${username}/.ssh
-        echo_date_message "${username} public key was added."
-    # Update user's public key in case it was changed (comparison shows changes)
-    elif ! (cmp -s ${tmp_dir}/${key} /home/${username}/.ssh/authorized_keys); then
-        cp -u ${tmp_dir}/${key} /home/${username}/.ssh/authorized_keys
-        chown -R ${username}:${username} /home/${username}/.ssh
-        echo_date_message "${username} public key was updated."
-    fi
-done
-
-# List of local users (excluding ec2-user, centos and ubuntu)
-local_users=$(ls /home | grep -Evw "ec2-user|centos|ubuntu")
-
-# Delete user in case its public key was deleted (nonexistent)
-for local_user in ${local_users}; do
-    if [ ! -f ${tmp_dir}/${local_user}.pub ]; then
-        /usr/sbin/userdel -rf ${local_user}
-        echo_date_message "${local_user} account was deleted."
-    fi
-done
-
-echo_date_message 'Finished.'
+log_info "Finished in ${SECONDS} sec."
