@@ -8,16 +8,19 @@ set -o pipefail
 # ------------------------------------------------------------------------------
 usage() {
     cat <<-EOF
-Usage: $0 [OPTION]...
-   or: $0 --s3-path PATH
-   or: $0 --s3-path PATH --debug
-   or: $0 -h|--help
+Usage: $0 [OPTION]... S3_PATH
 
 Sync SSH public keys from S3 and create/delete user accounts basing on key name.
+S3 path should be specified as 'bucket/dir'.
 
 Options:
-    -s, --s3-path [path]    S3 path to public keys (e.g. mybucket/ssh-keys).
-    -d, --debug             enable bash debugging.
+    -h, --help      print usage.
+    -c, --cronjob   create cronjob to sync keys and script.
+    -d, --debug     enable bash debugging.
+
+To create a cronjob and sync the keys, use the following command:
+    $0 -c bucket/dir1/dir2
+
 EOF
 }
 
@@ -33,6 +36,16 @@ TEMP_DIR=/tmp/ssh-keys
 # Log message with prepended date
 log_info() {
     echo -e "[$(date '+%Y-%m-%d %H:%M:%S')]: $1"
+}
+
+# Sync public keys from S3 bucket to local directory
+sync_keys() {
+    aws s3 sync s3://${S3_PATH} ${TEMP_DIR} \
+        --exclude "*"     \
+        --include "*.pub" \
+        --size-only       \
+        --delete          \
+        --no-progress
 }
 
 create_users_with_keys() {
@@ -70,7 +83,8 @@ create_users_with_keys() {
 # Delete user in case its public key was deleted
 delete_users_without_keys() {
     # List of local users (excluding ec2-user, centos and ubuntu)
-    local local_users=$(ls /home/ | grep -Evw "ec2-user|centos|ubuntu")
+    # TODO: Consider deleting users whose id > 1000
+    local local_users=$(ls /home/ | grep -Evw "$(id -nu 1000)|ec2-user|centos|ubuntu")
 
     for local_user in ${local_users}; do
         if [ ! -f "${TEMP_DIR}/${local_user}.pub" ]; then
@@ -80,43 +94,81 @@ delete_users_without_keys() {
     done
 }
 
+cronjob() {
+    local script_name=$(basename $0)
+    local script_dir=$(dirname $(realpath $0))
+
+    cat <<-EOF > /etc/cron.d/ssh-keys
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/root/bin
+SHELL=/bin/bash
+
+# Sync SSH keys every hour
+0 * * * * root ${script_name} -s ${S3_PATH} &>> /var/log/ssh-keys.log
+
+# Sync script daily after midnight
+5 0 * * * root aws s3 cp s3://${S3_PATH}/${script_name} ${script_dir} --no-progress &>> /var/log/ssh-keys.log
+6 0 * * * root chmod 700 $(realpath $0)
+EOF
+
+    log_info "Cronjob added."
+}
+
 # ------------------------------------------------------------------------------
-# Parse options and their arguments
+# Parse arguments
 # ------------------------------------------------------------------------------
-# If no options, print usage and exit
+# If no arguments, print usage and exit
 if [ $# -eq 0 ]; then
     usage
     exit 2
 fi
 
+# Parse arguments to get options and separate them from script parameters "$@"
+PARSED_ARGS=$(getopt --name "$(basename $0)" \
+                     --options cdh \
+                     --longoptions help,cronjob,debug -- "$@")
+# Reset script arguments to the parsed ones
+eval set -- "${PARSED_ARGS}"
+
+CRONJOB=false
+DEBUG=false
+
 while [ $# -ne 0 ]; do
-    arg="$1"
-    shift
-    case "$arg" in
-        -h|--help)     usage;         exit 0 ;;
-        -s|--s3-path)  s3_path=$1;    shift  ;;
-        -d|--debug)    set -o xtrace         ;;
-        *)             usage;         exit 1 ;;
+    case "$1" in
+        -h | --help    ) usage;        exit 0 ;;
+        -c | --cronjob ) CRONJOB=true; shift  ;;
+        -d | --debug   ) DEBUG=true;   shift  ;;
+        --             ) shift;        break  ;;
+        *              ) break                ;;
     esac
 done
+
+# Handle non-option arguments
+if [[ $# -ne 1 ]]; then
+    echo -e "$(basename $0): a single S3 path is required (e.g. bucket/dir)"
+    exit 1
+else
+    S3_PATH="$@"
+fi
 
 # ------------------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------------------
-log_info "Starting..."
+if [ "${DEBUG}" = true ]; then
+    set -o xtrace
+fi
 
-# Sync public keys from S3 bucket to local directory
-if (aws s3 sync s3://${s3_path}   \
-                ${TEMP_DIR}       \
-                --exclude "*"     \
-                --include "*.pub" \
-                --delete          \
-                --no-progress     \
-                | grep -Ewq '^download|delete'); then
+if [ "${CRONJOB}" = true ]; then
+    cronjob
+fi
+
+log_info "Starting..."
+sync_keys_output=$(sync_keys)
+
+if (echo "${sync_keys_output}" | grep -Ewq '^download|delete'); then
     create_users_with_keys
     delete_users_without_keys
 else
-    # Delete manually created users
+    # Delete manually created user accounts
     delete_users_without_keys
 fi
 
