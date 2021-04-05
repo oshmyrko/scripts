@@ -17,6 +17,8 @@ Options:
     -h, --help      print usage.
     -c, --cronjob   create cronjob to sync keys and script.
     -d, --debug     enable bash debugging.
+    -s, --sudoers   add sudoers to allow people in group wheel to run all
+                    commands.
 
 To create a cronjob and sync the keys, use the following command:
     $0 -c bucket/dir1/dir2
@@ -113,6 +115,20 @@ EOF
     log_info "Cronjob added."
 }
 
+# Allow people in group wheel to run all commands
+sudoers() {
+    groupadd --force wheel
+
+    cat <<-EOF > /etc/sudoers.d/10-wheel-users
+# Allows people in group wheel to run all commands
+%wheel ALL=(ALL) NOPASSWD: ALL
+EOF
+
+    chmod 440 /etc/sudoers.d/10-wheel-users
+
+    log_info "Sudoers added."
+}
+
 # ------------------------------------------------------------------------------
 # Parse arguments
 # ------------------------------------------------------------------------------
@@ -124,8 +140,8 @@ fi
 
 # Parse arguments to get options and separate them from script parameters "$@"
 PARSED_ARGS=$(getopt --name "$(basename $0)" \
-                     --options cdh \
-                     --longoptions help,cronjob,debug -- "$@")
+                     --options cdhs \
+                     --longoptions help,cronjob,debug,sudoers -- "$@")
 # Reset script arguments to the parsed ones
 eval set -- "${PARSED_ARGS}"
 
@@ -137,6 +153,7 @@ while [ $# -ne 0 ]; do
         -h | --help    ) usage;        exit 0 ;;
         -c | --cronjob ) CRONJOB=true; shift  ;;
         -d | --debug   ) DEBUG=true;   shift  ;;
+        -s | --sudoers ) SUDOERS=true; shift  ;;
         --             ) shift;        break  ;;
         *              ) break                ;;
     esac
@@ -159,6 +176,10 @@ fi
 
 if [ "${CRONJOB}" = true ]; then
     cronjob
+fi
+
+if [ "${SUDOERS}" = true ]; then
+    sudoers
 fi
 
 log_info "Starting..."
